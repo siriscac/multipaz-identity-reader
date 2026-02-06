@@ -43,6 +43,7 @@ import org.multipaz.trustmanagement.TrustManager
 import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Instant
+import org.multipaz.util.fromBase64Url
 
 private sealed class Value
 
@@ -337,8 +338,21 @@ private fun lineForDataElement(
     if (mdocDataElement != null) {
         if (mdocDataElement.attribute.type == DocumentAttributeType.Picture) {
             val text = mdocDataElement.renderValue(dataElementValue)
-            val image = decodeImage(dataElementValue.asBstr)
-            return Line(mdocDataElement.attribute.displayName, ValueImage(text, image))
+            val image = try {
+                decodeImage(dataElementValue.asBstr)
+            } catch (e: Throwable) {
+                try {
+                    val base64 = (dataElementValue as org.multipaz.cbor.Tstr).value
+                    decodeImage(base64.fromBase64Url())
+                } catch (e2: Throwable) {
+                    null
+                }
+            }
+            if (image != null) {
+                return Line(mdocDataElement.attribute.displayName, ValueImage(text, image))
+            } else {
+                return Line(mdocDataElement.attribute.displayName, ValueText(text))
+            }
         } else {
             val text = mdocDataElement.renderValue(dataElementValue)
             return Line(mdocDataElement.attribute.displayName, ValueText(text))

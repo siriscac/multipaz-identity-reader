@@ -27,6 +27,9 @@ enum class ReaderQuery(
     IDENTIFICATION(
         displayName = "Identification",
     ),
+    AADHAAR_IDENTIFICATION(
+        displayName = "Aadhaar",
+    ),
 
     ;
 
@@ -156,8 +159,22 @@ suspend fun generateEncodedDeviceRequest(
             mdlNs.put("issue_date", intentToRetain)
             mdlNs.put("expiry_date", intentToRetain)
         }
+        ReaderQuery.AADHAAR_IDENTIFICATION -> {}
     }
     val mdlDocType = DrivingLicense.MDL_DOCTYPE
+
+    val aadhaarItemsToRequest = mutableMapOf<String, MutableMap<String, Boolean>>()
+    val aadhaarNs = aadhaarItemsToRequest.getOrPut("in.gov.uidai.aadhaar.1") { mutableMapOf() }
+    when (query) {
+        ReaderQuery.AADHAAR_IDENTIFICATION -> {
+            aadhaarNs.put("birth_date", intentToRetain)
+            aadhaarNs.put("resident_name", intentToRetain)
+            aadhaarNs.put("age_over_18", intentToRetain)
+            aadhaarNs.put("resident_image", intentToRetain)
+        }
+        else -> {}
+    }
+    val aadhaarDocType = "in.gov.uidai.aadhaar.1"
 
     val photoIdItemsToRequest = mutableMapOf<String, MutableMap<String, Boolean>>()
     val iso23220Ns = photoIdItemsToRequest.getOrPut(PhotoID.ISO_23220_2_NAMESPACE) { mutableMapOf() }
@@ -187,6 +204,7 @@ suspend fun generateEncodedDeviceRequest(
             iso23220Ns.put("issue_date", intentToRetain)
             iso23220Ns.put("expiry_date", intentToRetain)
         }
+        ReaderQuery.AADHAAR_IDENTIFICATION -> {}
     }
     val photoIdDocType = PhotoID.PHOTO_ID_DOCTYPE
 
@@ -210,30 +228,47 @@ suspend fun generateEncodedDeviceRequest(
         deviceRequestInfo = deviceRequestInfo
     ) {
         if (readerKey != null) {
-            addDocRequest(
-                docType = mdlDocType,
-                nameSpaces = mdlItemsToRequest,
-                docRequestInfo = null,
-                readerKey = readerKey
-            )
-            if (deviceEngagement.capabilities.get(Capability.EXTENDED_REQUEST_SUPPORT)?.asBoolean == true) {
+            if (query != ReaderQuery.AADHAAR_IDENTIFICATION) {
                 addDocRequest(
-                    docType = photoIdDocType,
-                    nameSpaces = photoIdItemsToRequest,
+                    docType = mdlDocType,
+                    nameSpaces = mdlItemsToRequest,
+                    docRequestInfo = null,
+                    readerKey = readerKey
+                )
+                if (deviceEngagement.capabilities.get(Capability.EXTENDED_REQUEST_SUPPORT)?.asBoolean == true) {
+                    addDocRequest(
+                        docType = photoIdDocType,
+                        nameSpaces = photoIdItemsToRequest,
+                        docRequestInfo = null,
+                        readerKey = readerKey
+                    )
+                }
+            } else {
+                addDocRequest(
+                    docType = aadhaarDocType,
+                    nameSpaces = aadhaarItemsToRequest,
                     docRequestInfo = null,
                     readerKey = readerKey
                 )
             }
         } else {
-            addDocRequest(
-                docType = mdlDocType,
-                nameSpaces = mdlItemsToRequest,
-                docRequestInfo = null
-            )
-            if (deviceEngagement.capabilities.get(Capability.EXTENDED_REQUEST_SUPPORT)?.asBoolean == true) {
+            if (query != ReaderQuery.AADHAAR_IDENTIFICATION) {
                 addDocRequest(
-                    docType = photoIdDocType,
-                    nameSpaces = photoIdItemsToRequest,
+                    docType = mdlDocType,
+                    nameSpaces = mdlItemsToRequest,
+                    docRequestInfo = null
+                )
+                if (deviceEngagement.capabilities.get(Capability.EXTENDED_REQUEST_SUPPORT)?.asBoolean == true) {
+                    addDocRequest(
+                        docType = photoIdDocType,
+                        nameSpaces = photoIdItemsToRequest,
+                        docRequestInfo = null,
+                    )
+                }
+            } else {
+                addDocRequest(
+                    docType = aadhaarDocType,
+                    nameSpaces = aadhaarItemsToRequest,
                     docRequestInfo = null,
                 )
             }

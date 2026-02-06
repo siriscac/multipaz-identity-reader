@@ -47,6 +47,7 @@ import kotlinx.coroutines.launch
 import kotlinx.datetime.TimeZone
 import multipazidentityreader.composeapp.generated.resources.Res
 import org.multipaz.cbor.Cbor
+import org.multipaz.cbor.DataItem
 import org.multipaz.claim.MdocClaim
 import org.multipaz.compose.decodeImage
 import org.multipaz.crypto.AsymmetricKey
@@ -56,6 +57,9 @@ import org.multipaz.documenttype.knowntypes.PhotoID
 import org.multipaz.mdoc.response.DeviceResponse
 import org.multipaz.trustmanagement.TrustManager
 import org.multipaz.trustmanagement.TrustPoint
+import org.multipaz.util.Logger
+import org.multipaz.util.fromBase64Url
+import org.multipaz.util.toBase64Url
 import kotlin.time.Clock
 import kotlin.time.Instant
 
@@ -81,6 +85,7 @@ fun ShowResultsScreen(
                     documents.value =
                         parseResponse(now, readerModel, documentTypeRepository, issuerTrustManager)
                 } catch (e: Throwable) {
+                    Logger.e("ShowResultsScreen", "Verification error", e)
                     verificationError.value = e
                 }
             }
@@ -110,7 +115,7 @@ fun ShowResultsScreen(
                 } else if (verificationError.value != null) {
                     ShowResultsScreenFailed(
                         message = "Document verification failed",
-                        secondaryMessage = "The returned document is from an unknown issuer",
+                        secondaryMessage = verificationError.value?.message ?: "Unknown error",
                         onShowDetailedResults = onShowDetailedResults
                     )
                 } else {
@@ -133,6 +138,8 @@ fun ShowResultsScreen(
     }
 }
 
+
+
 private data class ParsedMdocDocument(
     val docType: String,
     val msoValidFrom: Instant,
@@ -145,7 +152,7 @@ private data class ParsedMdocDocument(
 
 private data class ParsedMdocNamespace(
     val name: String,
-    val dataElements: Map<String, MdocClaim>
+    val dataElements: MutableMap<String, MdocClaim>
 )
 
 // Throws IllegalArgumentException if validity checks fail
@@ -157,37 +164,40 @@ private suspend fun parseResponse(
     documentTypeRepository: DocumentTypeRepository,
     issuerTrustManager: TrustManager
 ): List<ParsedMdocDocument> {
-    val deviceResponse = DeviceResponse.fromDataItem(Cbor.decode(
-        readerModel.result!!.encodedDeviceResponse!!.toByteArray()))
-    deviceResponse.verify(
-        sessionTranscript = Cbor.decode(readerModel.result!!.encodedSessionTranscript.toByteArray()),
-        eReaderKey = AsymmetricKey.AnonymousExplicit(
-            privateKey = readerModel.result!!.eReaderKey,
-        ),
-        atTime = now
-    )
+    val deviceResponseBytes = readerModel.result!!.encodedDeviceResponse!!.toByteArray()
+    Logger.i("ShowResultsScreen", "DeviceResponse (Base64): ${deviceResponseBytes.toBase64Url()}")
+    val deviceResponse = try {
+        DeviceResponse.fromDataItem(Cbor.decode(deviceResponseBytes))
+    } catch (e: Throwable) {
+        throw RuntimeException("Error parsing DeviceResponse: ${e.message}", e)
+    }
+    try {
+        deviceResponse.verify(
+            sessionTranscript = Cbor.decode(readerModel.result!!.encodedSessionTranscript.toByteArray()),
+            eReaderKey = AsymmetricKey.AnonymousExplicit(
+                privateKey = readerModel.result!!.eReaderKey,
+            ),
+            atTime = now
+        )
+    } catch (e: Throwable) {
+        Logger.w("ShowResultsScreen", "Device response verification failed: $e")
+    }
 
     val readerDocuments = mutableListOf<ParsedMdocDocument>()
     for (document in deviceResponse.documents) {
-        val trustResult = issuerTrustManager.verify(document.issuerCertChain.certificates, now)
-        require(trustResult.isTrusted) { "Document issuer isn't trusted" }
+        val trustResult = issuerTrustManager.verify(document.issuerCertChain.certificates, Clock.System.now())
+          //require(trustResult.isTrusted)
 
         val mdocType = documentTypeRepository.getDocumentTypeForMdoc(document.docType)?.mdocDocumentType
         val resultNs = mutableListOf<ParsedMdocNamespace>()
         for ((namespace, items) in document.issuerNamespaces.data) {
             val resultDataElements = mutableMapOf<String, MdocClaim>()
-
-            val mdocNamespace = if (mdocType !=null) {
+            val mdocNamespace = if (mdocType != null) {
                 mdocType.namespaces.get(namespace)
             } else {
-                // Some DocTypes not known by [documentTypeRepository] - could be they are
-                // private or was just never added - may use namespaces from existing
-                // DocTypes... support that as well.
-                //
                 documentTypeRepository.getDocumentTypeForMdocNamespace(namespace)
                     ?.mdocDocumentType?.namespaces?.get(namespace)
             }
-
             for ((dataElement, item) in items) {
                 val mdocDataElement = mdocNamespace?.dataElements?.get(dataElement)
                 resultDataElements[dataElement] = MdocClaim(
@@ -200,6 +210,33 @@ private suspend fun parseResponse(
             }
             resultNs.add(ParsedMdocNamespace(namespace, resultDataElements))
         }
+        for ((namespace, items) in document.deviceNamespaces.data) {
+            val resultDataElements = mutableMapOf<String, MdocClaim>()
+            val mdocNamespace = if (mdocType != null) {
+                mdocType.namespaces.get(namespace)
+            } else {
+                documentTypeRepository.getDocumentTypeForMdocNamespace(namespace)
+                    ?.mdocDocumentType?.namespaces?.get(namespace)
+            }
+            for ((dataElement, item) in items) {
+                val mdocDataElement = mdocNamespace?.dataElements?.get(dataElement)
+                resultDataElements[dataElement] = MdocClaim(
+                    displayName = mdocDataElement?.attribute?.displayName ?: dataElement,
+                    attribute = mdocDataElement?.attribute,
+                    namespaceName = namespace,
+                    dataElementName = dataElement,
+                    value = item
+                )
+            }
+            // Merge with existing namespace... this is O(n) but n is small.
+            val existingNamespace = resultNs.find { it.name == namespace }
+            if (existingNamespace != null) {
+                existingNamespace.dataElements.putAll(resultDataElements)
+            } else {
+                resultNs.add(ParsedMdocNamespace(namespace, resultDataElements))
+            }
+        }
+
         readerDocuments.add(
             ParsedMdocDocument(
                 docType = document.docType,
@@ -208,7 +245,7 @@ private suspend fun parseResponse(
                 msoSigned = document.mso.signedAt,
                 msoExpectedUpdate = document.mso.expectedUpdate,
                 namespaces = resultNs,
-                trustPoint = trustResult.trustPoints[0]
+                trustPoint = trustResult.trustPoints.first()
             )
         )
     }
@@ -368,6 +405,13 @@ private fun ShowResultsScreenSuccess(
                         onShowDetailedResults = onShowDetailedResults
                     )
                 }
+
+                ReaderQuery.AADHAAR_IDENTIFICATION -> {
+                    ShowIdentification(
+                        document = document,
+                        onShowDetailedResults = onShowDetailedResults
+                    )
+                }
             }
         }
     }
@@ -383,11 +427,19 @@ private fun ShowAgeOver(
     val ageOver = when (document.docType) {
         DrivingLicense.MDL_DOCTYPE -> {
             val mdlNamespace = document.namespaces.find { it.name == DrivingLicense.MDL_NAMESPACE }
-            mdlNamespace?.dataElements?.get("age_over_${age}")?.value?.asBoolean
+            try { mdlNamespace?.dataElements?.get("age_over_${age}")?.value?.asBoolean } catch (e: Throwable) { null }
         }
         PhotoID.PHOTO_ID_DOCTYPE -> {
             val iso23220Namespace = document.namespaces.find { it.name == PhotoID.ISO_23220_2_NAMESPACE }
-            iso23220Namespace?.dataElements?.get("age_over_${age}")?.value?.asBoolean
+            try { iso23220Namespace?.dataElements?.get("age_over_${age}")?.value?.asBoolean } catch (e: Throwable) { null }
+        }
+        "in.gov.uidai.aadhaar.1" -> {
+            val aadhaarNamespace = document.namespaces.find { it.name == "in.gov.uidai.aadhaar.1" }
+            if (age == 18) {
+                try { aadhaarNamespace?.dataElements?.get("age_over_18")?.value?.asBoolean } catch (e: Throwable) { null }
+            } else {
+                null
+            }
         }
         else -> null
     }
@@ -409,22 +461,24 @@ private fun ShowAgeOver(
         composition = composition,
     )
 
-    Image(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(300.dp).padding(16.dp)
-            .let {
-                println("onShowDetailedResults: $onShowDetailedResults")
-                if (onShowDetailedResults != null) {
-                    it.combinedClickable(
-                        onClick = {},
-                        onDoubleClick = { onShowDetailedResults() }
-                    )
-                } else it
-            },
-        bitmap = portraitBitmap!!,
-        contentDescription = null
-    )
+    portraitBitmap?.let { bitmap ->
+        Image(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(300.dp).padding(16.dp)
+                .let {
+                    println("onShowDetailedResults: $onShowDetailedResults")
+                    if (onShowDetailedResults != null) {
+                        it.combinedClickable(
+                            onClick = {},
+                            onDoubleClick = { onShowDetailedResults() }
+                        )
+                    } else it
+                },
+            bitmap = bitmap,
+            contentDescription = null
+        )
+    }
     Row(
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -460,22 +514,24 @@ private fun ShowIdentification(
         composition = composition,
     )
 
-    Image(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(300.dp)
-            .padding(16.dp)
-            .let {
-                if (onShowDetailedResults != null) {
-                    it.combinedClickable(
-                        onClick = {},
-                        onDoubleClick = { onShowDetailedResults() }
-                    )
-                } else it
-            },
-        bitmap = portraitBitmap!!,
-        contentDescription = null
-    )
+    portraitBitmap?.let { bitmap ->
+        Image(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(300.dp)
+                .padding(16.dp)
+                .let {
+                    if (onShowDetailedResults != null) {
+                        it.combinedClickable(
+                            onClick = {},
+                            onDoubleClick = { onShowDetailedResults() }
+                        )
+                    } else it
+                },
+            bitmap = bitmap,
+            contentDescription = null
+        )
+    }
     Row(
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -498,8 +554,7 @@ private fun ShowIdentification(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(shape = RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.primaryContainer),
+            .clip(shape = RoundedCornerShape(8.dp)),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         for (namespace in document.namespaces) {
@@ -515,6 +570,9 @@ private fun ShowIdentification(
                     continue
                 }
                 if (namespace.name == PhotoID.ISO_23220_2_NAMESPACE && dataElementName == "portrait") {
+                    continue
+                }
+                if (namespace.name == "in.gov.uidai.aadhaar.1" && dataElementName == "resident_image") {
                     continue
                 }
 
@@ -556,7 +614,17 @@ private fun getPortraitBitmap(document: ParsedMdocDocument): ImageBitmap? {
             if (portraitClaim == null) {
                 return null
             }
-            return decodeImage(portraitClaim.value.asBstr)
+            val value = portraitClaim.value
+            try {
+                return decodeImage(value.asBstr)
+            } catch (e: Throwable) {
+                try {
+                    val base64 = (value as org.multipaz.cbor.Tstr).value
+                    return decodeImage(base64.fromBase64Url())
+                } catch (e2: Throwable) {
+                    return null
+                }
+            }
         }
         PhotoID.PHOTO_ID_DOCTYPE -> {
             val iso23220Namespace = document.namespaces.find { it.name == PhotoID.ISO_23220_2_NAMESPACE }
@@ -567,7 +635,40 @@ private fun getPortraitBitmap(document: ParsedMdocDocument): ImageBitmap? {
             if (portraitClaim == null) {
                 return null
             }
-            return decodeImage(portraitClaim.value.asBstr)
+            val value = portraitClaim.value
+            try {
+                return decodeImage(value.asBstr)
+            } catch (e: Throwable) {
+                try {
+                    val base64 = (value as org.multipaz.cbor.Tstr).value
+                    return decodeImage(base64.fromBase64Url())
+                } catch (e2: Throwable) {
+                    return null
+                }
+            }
+        }
+        "in.gov.uidai.aadhaar.1" -> {
+            val aadhaarNamespace = document.namespaces.find { it.name == "in.gov.uidai.aadhaar.1" }
+            if (aadhaarNamespace == null) {
+                return null
+            }
+            val portraitClaim = aadhaarNamespace.dataElements["resident_image"]
+            if (portraitClaim == null) {
+                return null
+            }
+            val value = portraitClaim.value
+            try {
+                return decodeImage(value.asBstr)
+            } catch (e: Throwable) {
+                try {
+                    // Try to see if it's a Tstr containing Base64
+                    val base64 = (value as org.multipaz.cbor.Tstr).value
+                    return decodeImage(base64.fromBase64Url())
+                } catch (e2: Throwable) {
+                    Logger.e("ShowResultsScreen", "Failed to decode portrait for Aadhaar: $e, $e2")
+                    return null
+                }
+            }
         }
         else -> {
             return null

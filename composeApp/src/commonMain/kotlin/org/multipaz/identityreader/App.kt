@@ -22,7 +22,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.io.bytestring.ByteString
+import java.util.Base64
+
 import org.multipaz.cbor.Cbor
 import org.multipaz.cbor.Simple
 import org.multipaz.compose.prompt.PromptDialogs
@@ -36,9 +37,12 @@ import org.multipaz.trustmanagement.TrustEntryX509Cert
 import org.multipaz.trustmanagement.TrustManager
 import org.multipaz.trustmanagement.TrustManagerLocal
 import org.multipaz.util.Logger
+import org.multipaz.util.toBase64Url
+import org.multipaz.crypto.X509Cert
+import org.multipaz.trustmanagement.TrustMetadata
+import kotlinx.io.bytestring.ByteString
 import org.multipaz.util.Platform
 import org.multipaz.util.fromBase64Url
-import org.multipaz.util.toBase64Url
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.hours
 
@@ -59,6 +63,19 @@ class App(
 ) {
     companion object {
         private const val TAG = "App"
+        private const val AADHAAR_ISSUER_CERT = """
+-----BEGIN CERTIFICATE-----
+MIIBpTCCAUugAwIBAgIBATAKBggqhkjOPQQDAjAzMQswCQYDVQQGEwJJTjEOMAwG
+A1UEChMFVUlEQUkxFDASBgNVBAMTC21kb2MtaXNzdWVyMB4XDTI2MDEyODA3MTIz
+MFoXDTI3MDEyODA3MTczMFowMzELMAkGA1UEBhMCSU4xDjAMBgNVBAoTBVVJREFJ
+MRQwEgYDVQQDEwttZG9jLWlzc3VlcjBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IA
+BCahwjDbmrjZWygfAukfdrrCWyfeGWl+DU/BxmxAsOCYCQ27luNcGMom1Xa0U5Bi
+dCimDRutScawmNB4xWSNEz2jUDBOMA4GA1UdDwEB/wQEAwIFoDAPBgNVHSUECDAG
+BgRVHSUAMAwGA1UdEwEB/wQCMAAwHQYDVR0OBBYEFMTbACNz71+rpZtczv+pl5HI
+dJzqMAoGCCqGSM49BAMCA0gAMEUCIQCSlQRcxBWy4vL/91vYoGuej5TeihduMMZ2
+SDwvVMSzBgIgRhol9QyCQ5sep76Q08iAl+uYRVOF/qPF3GCrYtBIOAI=
+-----END CERTIFICATE-----
+"""
     }
 
     private val promptModel = Platform.promptModel
@@ -207,6 +224,20 @@ class App(
                 Logger.i(TAG, "Updated built-in issuer list from $currentVersion to version $version")
             } else {
                 Logger.i(TAG, "No update to built-in issuer list at version $currentVersion")
+            }
+            try {
+                val base64 = AADHAAR_ISSUER_CERT
+                    .replace("-----BEGIN CERTIFICATE-----", "")
+                    .replace("-----END CERTIFICATE-----", "")
+                    .filter { !it.isWhitespace() }
+                val bytes = Base64.getDecoder().decode(base64)
+                builtInTrustManager.addX509Cert(X509Cert(ByteString(bytes)), TrustMetadata(displayName = "Aadhaar Issuer"))
+            } catch (e: Exception) {
+                if (e.message?.contains("TrustPoint with given SubjectKeyIdentifier already exists") == true) {
+                    Logger.i(TAG, "Aadhaar issuer cert already exists")
+                } else {
+                    Logger.e(TAG, "Failed to add Aadhaar issuer cert", e)
+                }
             }
         } catch (e: Throwable) {
             Logger.i(TAG, "Error when checking for updated issuer trust list: $e")

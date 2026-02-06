@@ -5,6 +5,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import io.ktor.client.engine.cio.CIO
 import io.ktor.http.HttpStatusCode
 import junit.framework.TestCase.assertTrue
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.datetime.DateTimePeriod
 import kotlinx.io.bytestring.ByteString
@@ -40,6 +41,7 @@ import kotlin.test.fail
 import kotlin.time.Duration.Companion.days
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Instant
+import org.multipaz.crypto.AsymmetricKey
 import org.multipaz.identityreader.libbackend.ReaderIdentity as BackendReaderIdentity
 
 class ReaderBackendTest {
@@ -60,32 +62,36 @@ class ReaderBackendTest {
         numKeys = numKeys
     ) {
         private val readerRootKeyForUntrustedDevices = Crypto.createEcPrivateKey(EcCurve.P384)
-        val readerRootCertChainForUntrustedDevices = X509CertChain(
-            listOf(
-                MdocUtil.generateReaderRootCertificate(
-                    readerRootKey = readerRootKeyForUntrustedDevices,
-                    subject = X500Name.fromName("CN=TEST Reader Root (Untrusted Devices)"),
-                    serial = ASN1Integer.fromRandom(numBits = 128),
-                    validFrom = Instant.parse("2024-07-01T06:00:00Z"),
-                    validUntil = Instant.parse("2030-07-01T06:00:00Z"),
-                    crlUrl = "https://www.example.com/crl"
+        val readerRootCertChainForUntrustedDevices = runBlocking {
+            X509CertChain(
+                listOf(
+                    MdocUtil.generateReaderRootCertificate(
+                        readerRootKey = AsymmetricKey.anonymous(readerRootKeyForUntrustedDevices),
+                        subject = X500Name.fromName("CN=TEST Reader Root (Untrusted Devices)"),
+                        serial = ASN1Integer.fromRandom(numBits = 128),
+                        validFrom = Instant.parse("2024-07-01T06:00:00Z"),
+                        validUntil = Instant.parse("2030-07-01T06:00:00Z"),
+                        crlUrl = "https://www.example.com/crl"
+                    )
                 )
             )
-        )
+        }
 
         private val readerRootKey = Crypto.createEcPrivateKey(EcCurve.P384)
-        val readerRootCertChain = X509CertChain(
-            listOf(
-                MdocUtil.generateReaderRootCertificate(
-                    readerRootKey = readerRootKey,
-                    subject = X500Name.fromName("CN=TEST Reader Root"),
-                    serial = ASN1Integer.fromRandom(numBits = 128),
-                    validFrom = Instant.parse("2024-07-01T06:00:00Z"),
-                    validUntil = Instant.parse("2030-07-01T06:00:00Z"),
-                    crlUrl = "https://www.example.com/crl"
+        val readerRootCertChain = runBlocking {
+            X509CertChain(
+                listOf(
+                    MdocUtil.generateReaderRootCertificate(
+                        readerRootKey = AsymmetricKey.anonymous(readerRootKey),
+                        subject = X500Name.fromName("CN=TEST Reader Root"),
+                        serial = ASN1Integer.fromRandom(numBits = 128),
+                        validFrom = Instant.parse("2024-07-01T06:00:00Z"),
+                        validUntil = Instant.parse("2030-07-01T06:00:00Z"),
+                        crlUrl = "https://www.example.com/crl"
+                    )
                 )
             )
-        )
+        }
 
         private var serverStorage_ = serverStorage
 
@@ -411,7 +417,7 @@ class ReaderBackendTest {
         val issuerTrustList1 = listOf(
             TrustEntryX509Cert(
                 metadata = TrustMetadata(displayName = "foo", displayIcon = ByteString(1, 2, 3)),
-                certificate = X509Cert(byteArrayOf(10, 11, 12))
+                certificate = X509Cert(ByteString(10, 11, 12))
             ),
             TrustEntryVical(
                 metadata = TrustMetadata(displayName = "bar", displayIcon = ByteString(4, 5, 6)),
@@ -502,7 +508,7 @@ class ReaderBackendTest {
 
         val fooPrivateKey = Crypto.createEcPrivateKey(curve = EcCurve.P384)
         val fooCertChain = X509CertChain(certificates = listOf(MdocUtil.generateReaderRootCertificate(
-            readerRootKey = fooPrivateKey,
+            readerRootKey = AsymmetricKey.anonymous(fooPrivateKey),
             subject = X500Name.fromName("CN=Foo Reader CA"),
             serial = ASN1Integer.fromRandom(numBits = 128),
             validFrom = Instant.parse("2024-07-01T06:00:00Z"),
@@ -512,7 +518,7 @@ class ReaderBackendTest {
 
         val barPrivateKey = Crypto.createEcPrivateKey(curve = EcCurve.P384)
         val barCertChain = X509CertChain(certificates = listOf(MdocUtil.generateReaderRootCertificate(
-            readerRootKey = barPrivateKey,
+            readerRootKey = AsymmetricKey.anonymous(barPrivateKey),
             subject = X500Name.fromName("CN=Bar Reader CA"),
             serial = ASN1Integer.fromRandom(numBits = 128),
             validFrom = Instant.parse("2024-07-01T06:00:00Z"),
