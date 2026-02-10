@@ -298,6 +298,9 @@ class ReaderModel {
 
             val (message, status) = sessionEncryption.decryptMessage(sessionData)
             Logger.i(TAG, "Holder sent ${message?.size} bytes status $status")
+            if (message != null) {
+                Logger.iCbor(TAG, "DeviceResponse", message)
+            }
             if (status == Constants.SESSION_DATA_STATUS_SESSION_TERMINATION) {
                 //showToast("Received session termination message from holder")
                 Logger.i(

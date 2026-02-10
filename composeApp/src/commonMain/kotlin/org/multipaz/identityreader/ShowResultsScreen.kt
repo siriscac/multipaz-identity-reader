@@ -60,6 +60,7 @@ import org.multipaz.trustmanagement.TrustPoint
 import org.multipaz.util.Logger
 import org.multipaz.util.fromBase64Url
 import org.multipaz.util.toBase64Url
+import org.multipaz.util.toHex
 import kotlin.time.Clock
 import kotlin.time.Instant
 
@@ -147,7 +148,7 @@ private data class ParsedMdocDocument(
     val msoSigned: Instant,
     val msoExpectedUpdate: Instant?,
     val namespaces: List<ParsedMdocNamespace>,
-    val trustPoint: TrustPoint
+    val trustPoint: TrustPoint?
 )
 
 private data class ParsedMdocNamespace(
@@ -165,22 +166,29 @@ private suspend fun parseResponse(
     issuerTrustManager: TrustManager
 ): List<ParsedMdocDocument> {
     val deviceResponseBytes = readerModel.result!!.encodedDeviceResponse!!.toByteArray()
-    Logger.i("ShowResultsScreen", "DeviceResponse (Base64): ${deviceResponseBytes.toBase64Url()}")
+    Logger.iCbor("ShowResultsScreen", "DeviceResponse", Cbor.decode(deviceResponseBytes))
+    Logger.d("ShowResultsScreen", "DeviceResponse (Hex): ${deviceResponseBytes.toHex()}")
+    println("ShowResultsScreen: DeviceResponse size: ${deviceResponseBytes.size}")
+
     val deviceResponse = try {
         DeviceResponse.fromDataItem(Cbor.decode(deviceResponseBytes))
     } catch (e: Throwable) {
         throw RuntimeException("Error parsing DeviceResponse: ${e.message}", e)
     }
+    val sessionTranscript = Cbor.decode(readerModel.result!!.encodedSessionTranscript.toByteArray())
+    Logger.iCbor("ShowResultsScreen", "SessionTranscript", sessionTranscript)
+    Logger.d("ShowResultsScreen", "SessionTranscript: $sessionTranscript")
+    println("ShowResultsScreen: SessionTranscript: $sessionTranscript")
     try {
         deviceResponse.verify(
-            sessionTranscript = Cbor.decode(readerModel.result!!.encodedSessionTranscript.toByteArray()),
+            sessionTranscript = sessionTranscript,
             eReaderKey = AsymmetricKey.AnonymousExplicit(
                 privateKey = readerModel.result!!.eReaderKey,
             ),
             atTime = now
         )
     } catch (e: Throwable) {
-        Logger.w("ShowResultsScreen", "Device response verification failed: $e")
+        Logger.w("ShowResultsScreen", "Device response verification failed", e)
     }
 
     val readerDocuments = mutableListOf<ParsedMdocDocument>()
@@ -245,7 +253,7 @@ private suspend fun parseResponse(
                 msoSigned = document.mso.signedAt,
                 msoExpectedUpdate = document.mso.expectedUpdate,
                 namespaces = resultNs,
-                trustPoint = trustResult.trustPoints.first()
+                trustPoint = trustResult.trustPoints.firstOrNull()
             )
         )
     }
@@ -363,7 +371,7 @@ private fun ShowResultsScreenSuccess(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            if (document.trustPoint.metadata.testOnly) {
+            if (document.trustPoint?.metadata?.testOnly == true) {
                 Text(
                     text = "TEST DATA\nDO NOT USE",
                     textAlign = TextAlign.Center,
@@ -663,7 +671,10 @@ private fun getPortraitBitmap(document: ParsedMdocDocument): ImageBitmap? {
                 try {
                     // Try to see if it's a Tstr containing Base64
                     val base64 = (value as org.multipaz.cbor.Tstr).value
-                    return decodeImage(base64.fromBase64Url())
+                    // The error "Invalid symbol '/'" suggests standard Base64 is used, but fromBase64Url expects URL-safe.
+                    // Convert standard to URL-safe: + -> -, / -> _
+                    val urlSafeBase64 = base64.replace('+', '-').replace('/', '_')
+                    return decodeImage(urlSafeBase64.fromBase64Url())
                 } catch (e2: Throwable) {
                     Logger.e("ShowResultsScreen", "Failed to decode portrait for Aadhaar: $e, $e2")
                     return null
